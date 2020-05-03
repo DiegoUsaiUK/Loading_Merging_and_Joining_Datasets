@@ -1,0 +1,363 @@
+---
+title: "Loading, Merging and Joining Datasets - PostgreSQL Edition"
+subtitle: "Includes general housekeeping tasks like sorting variables names, creating essential features and sorting out variables order"
+author: "Diego Usai"
+date: "23 September 2019"
+output:
+   html_document:
+   theme: spacelab
+   df_print: paged
+   highlight: pygments
+   number_sections: false
+   toc: true
+   toc_float: true
+   toc_depth : 4
+   font-family: Roboto
+   code_folding: none
+   keep_md: false
+   dpi: 300
+---
+   
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+   eval    = TRUE,      # TRUE to evaluate every single chunck
+   warning = FALSE,     # FALSE to suppress warnings from being shown
+   message = FALSE,     # FALSE to avoid package loading messages
+   cache   = FALSE,     # TRUE to save every single chunck to a folder
+   echo    = TRUE,      # TRUE for display code in output document
+   out.width = "80%",
+   out.height = "80%",
+   fig.align = "center"
+)
+```
+
+```{r switch off locale, include=FALSE}
+# turn off locale-specific sorting for messages in English
+Sys.setlocale("LC_TIME", "C")
+```
+
+```{r Load libraries, message = FALSE, include=TRUE}
+library(tidyverse)
+library(lubridate)
+library(odbc)       # connecting to ODBC databases using DBI interface
+library(DBI)        # database interface
+library(RPostgres)  
+library(knitr)
+```
+
+## Outline
+
+This is the coding necessary to assemble the various data feeds and sort out the likes of variables naming & new features creation plus some general housekeeping tasks. 
+
+In order to simulate normal working conditions I would face if the data was stored on a database, I've uploaded the excel files onto a local __PostgreSQL database__ that I've created on my machine. I am going to go through the steps I followed to set up a connection between RStudio and said database and extract the information I needed.
+
+I am also going to carry out some general housekeeping tasks like sorting variables names, creating essential features and sorting out variables order.
+
+## The Dataset
+
+The dataset I'm using here accompanies a Redbooks publication called [_Building 360-Degree Information Applications_](https://www.redbooks.ibm.com/abstracts/sg248133.html?Open) which is available as a free PDF download. Also available as a free download are the excel files in the [__Additional Material__](ftp://www.redbooks.ibm.com/redbooks/SG248133) section to follow along with the exercises in the book.
+
+The data covers _3 & 1/2 years_ worth of sales `orders` for the __Sample Outdoors Company__, a fictitious B2B outdoor equipment retailer enterprise. The data comes with details about the `products` they sell as well as their customers (which are `retailers` in their case). The data is a subset of the _GSDB database_, a realistic and feature-rich database created by IBM® to support demos for their products.
+
+
+## Create the connection
+
+Detailed instructions on how to work databases in R can be found on [__Databases using R__](https://db.rstudio.com/). This RStudio resource file is quite simply __a treasure trove of information__, spanning from _setting up a connection_ with a vast array of open source and proprietary databases & _running queries_ to _creating visualisations and dashboards_.
+
+First thing I need to do is to fetch the information required to establish a link to my database. In everyday work settings this information would be provided by __your database administrator__ but given that I've created the database myself and I'm hosting it on my machine, I've retrieved all information myself from the main page on `pgAdmin`, the GUI tool for PostgreSQL: 
+
+__Select `PostgresSQL` then go to `Properties` and look for the `Connection` tab__
+
+```{r db_info, echo=FALSE}
+knitr::include_graphics("../00_img/db_info.png")
+```
+
+I can now create a connection to the database with the `dbConnect` command
+
+```{r create connection, include=FALSE}
+mycon <- 
+   DBI::dbConnect(RPostgres::Postgres(), # constructs the driver
+                     dbname = "customer_analytics", # the name of the schema
+                     host = "localhost", # host name (local in my case)
+                     port = "5432",      # usual port name
+                     user = 'postgres',  # 
+                     password = "Sharmu77a" # PW to 'connect to server'
+                     )
+```
+
+```{r create connection copy, eval=FALSE}
+mycon <- 
+   DBI::dbConnect(RPostgres::Postgres(),  # constructs the driver
+                     dbname = "customer_analytics", # the name of the schema
+                     host = "localhost",  # host name (local in my case)
+                     port = "5432",       # usual port name
+                     user = 'postgres',   # user name
+                     password = "your_PW" # PW to 'connect to server'
+                     )
+```
+
+Once the connection is established, I use `dbListTables` to inspect the database content
+```{r}
+#list all tables
+table_chr <- DBI::dbListTables(mycon)
+
+table_chr
+```
+
+Now I use `tbl()` to take a reference to the `orders`table...
+
+```{r}
+orders_db <- 
+   dplyr::tbl(mycon, "orders")
+```
+
+...and take a look at it as I normally would with `glimpse`
+
+```{r,, collapse=TRUE}
+orders_db %>% glimpse()
+```
+This mostly looks like a regular tibble with two important differences:
+
+1- The reference to the remote source on a `PostgreSQL` database is shown
+
+2- The number of `Observations` is not showing
+
+The latter is due to the fact that any operation carried out on the `_db` ending tables is simply creating a "reference" to the queries you want to carry out on the database. The actual queries are  executed in one go at the very end, when you send the `collect` request to the database - more on this later on.
+
+I start by removing all `order_method` other than English.
+```{r}
+orders_db <- 
+   orders_db %>% 
+   rename(
+      order_method = order_method_en,
+      retailer = retailer_name
+      )  %>% 
+   select(
+      -contains('order_method_')
+      ) 
+```
+
+```{r,, collapse=TRUE}
+orders_db %>% glimpse()
+```
+
+Then I take a reference to the `products` table, which, as it says on the tin, contains the products information
+```{r}
+# load products file
+products_db <- 
+   tbl(mycon, "products")
+```
+
+```{r, collapse=TRUE}
+products_db %>% glimpse()
+```
+
+Finally, the `retailers` table
+```{r}
+# load retailer info
+retailers_db <- 
+   tbl(mycon, "retailers")
+```
+
+```{r, collapse=TRUE}
+retailers_db %>% glimpse()
+```
+
+Now I can joining `orders_db`, `products_db` and `retailers_db` info into one data frame
+```{r}
+
+df_db <- 
+   orders_db %>% 
+   left_join(products_db, by = ('product_number')) %>% 
+   left_join(retailers_db, by = ('retailer_site_code')) 
+```
+
+```{r}
+df_db %>% glimpse()
+```
+
+I'm happy with the queries I've ran and I use `collect()` to pull all data into a local tibble. This is the stage when the queries are actually applied to the database and, depending on their complexity, number of calculations and amount of data involved, it may take some time to complete. 
+
+```{r}
+df <- 
+   df_db %>% 
+   collect()
+```
+
+```{r}
+df %>% 
+   glimpse()
+```
+
+Don't forget to disconnect from the database
+```{r}
+dbDisconnect(mycon)
+```
+
+
+## Creating essential features & some housekeeping tasks
+
+One long piece of code to sort all in one go. 
+
+I've added comments to each block to explain what it's doing. 
+```{r}
+
+orders_tbl   <- 
+   
+    # create revenue, total product cost and gross profit
+   df %>%
+      mutate(
+         production_cost = quantity * unit_cost,
+         revenue         = quantity * unit_sale_price,
+         planned_revenue = quantity * unit_price,
+         gross_profit    = revenue  - production_cost
+      ) %>% 
+      
+      # replacing NAs in the return_count variable
+   replace_na(list(return_count = 0)) %>% 
+      
+    # Shorten product line names for readablility and ease of use in charts and code
+    
+   mutate(
+      prod_line = case_when(
+         product_line == 'Camping Equipment' ~ 'Camping_Eqpt',
+         product_line == 'Golf Equipment' ~ 'Golf_Eqpt',
+         product_line == 'Mountaineering Equipment' ~ 'Mountain_Eqpt',
+         product_line == 'Personal Accessories' ~ 'Personal_Acces',
+         product_line == 'Outdoor Protection' ~ 'Outdoor_Prot',
+         TRUE ~ product_line
+      ),
+      
+      prod_line_2 = case_when(
+         product_line == 'Camping Equipment' ~ 'Camping_Eqpt',
+         product_line == 'Golf Equipment' ~ 'Golf_Eqpt',
+         product_line == 'Mountaineering Equipment' ~ 'Mountain_Eqpt',
+         product_line == 'Personal Accessories' ~ 'Personal_Acces',
+         product_line == 'Outdoor Protection' ~ 'Personal_Acces',
+         TRUE ~ product_line
+      ),
+      
+      # create alternative regional group
+      region2 = case_when(
+         country_en %in% c('United Kingdom', 'France', 'Spain',  
+                        'Netherlands','Belgium','Switzerland') ~ 'West_Europe',
+         country_en %in% c('Germany', 'Italy', 'Finland',  
+                        'Austria','Sweden','Denmark') ~ 'East_Europe',
+         TRUE ~ region_en
+      )
+   ) %>% 
+   
+   # create financial years
+   mutate(
+      ord_date = ymd(order_date),
+      fin_year = case_when(
+         between(ord_date, ymd("2004-07-01"), ymd('2005-06-30')) ~ 'FY_04_05',
+         between(ord_date, ymd("2005-07-01"), ymd('2006-06-30')) ~ 'FY_05_06',
+         between(ord_date, ymd("2006-07-01"), ymd('2007-06-30')) ~ 'FY_06_07',
+         TRUE ~ 'other'
+      ),
+      
+      # create all quarters
+      quarter_all = case_when(
+         between(ord_date, ymd("2004-01-01"), ymd('2004-03-31')) ~ '04_Q1',
+         between(ord_date, ymd("2004-04-01"), ymd('2004-06-30')) ~ '04_Q2',
+         between(ord_date, ymd("2004-07-01"), ymd('2004-09-30')) ~ '04_Q3',
+         between(ord_date, ymd("2004-10-01"), ymd('2004-12-31')) ~ '04_Q4',
+         between(ord_date, ymd("2005-01-01"), ymd('2005-03-31')) ~ '05_Q1',
+         between(ord_date, ymd("2005-04-01"), ymd('2005-06-30')) ~ '05_Q2',
+         between(ord_date, ymd("2005-07-01"), ymd('2005-09-30')) ~ '05_Q3',
+         between(ord_date, ymd("2005-10-01"), ymd('2005-12-31')) ~ '05_Q4',
+         between(ord_date, ymd("2006-01-01"), ymd('2006-03-31')) ~ '06_Q1',
+         between(ord_date, ymd("2006-04-01"), ymd('2006-06-30')) ~ '06_Q2',
+         between(ord_date, ymd("2006-07-01"), ymd('2006-09-30')) ~ '06_Q3',
+         between(ord_date, ymd("2006-10-01"), ymd('2006-12-31')) ~ '06_Q4',
+         between(ord_date, ymd("2007-01-01"), ymd('2007-03-31')) ~ '07_Q1',
+         between(ord_date, ymd("2007-04-01"), ymd('2007-06-30')) ~ '07_Q2',
+         between(ord_date, ymd("2007-07-01"), ymd('2007-09-30')) ~ '07_Q3',
+         TRUE ~ 'other'
+      ),
+      
+      # create selected quarters
+      quarter_sel = case_when(
+         between(ord_date, ymd("2004-07-01"), ymd('2004-09-30')) ~ '04_Q3',
+         between(ord_date, ymd("2004-10-01"), ymd('2004-12-31')) ~ '04_Q4',
+         between(ord_date, ymd("2005-01-01"), ymd('2005-03-31')) ~ '05_Q1',
+         between(ord_date, ymd("2005-04-01"), ymd('2005-06-30')) ~ '05_Q2',
+         between(ord_date, ymd("2005-07-01"), ymd('2005-09-30')) ~ '05_Q3',
+         between(ord_date, ymd("2005-10-01"), ymd('2005-12-31')) ~ '05_Q4',
+         between(ord_date, ymd("2006-01-01"), ymd('2006-03-31')) ~ '06_Q1',
+         between(ord_date, ymd("2006-04-01"), ymd('2006-06-30')) ~ '06_Q2',
+         between(ord_date, ymd("2006-07-01"), ymd('2006-09-30')) ~ '06_Q3',
+         between(ord_date, ymd("2006-10-01"), ymd('2006-12-31')) ~ '06_Q4',
+         between(ord_date, ymd("2007-01-01"), ymd('2007-03-31')) ~ '07_Q1',
+         between(ord_date, ymd("2007-04-01"), ymd('2007-06-30')) ~ '07_Q2',
+         TRUE ~ 'other'
+      )
+      
+      
+   ) %>% 
+   
+   # reorder columns and rename a few
+      select(
+      order_number,
+      order_date,
+      order_close_date,
+      order_ship_date = ship_date,
+      fin_year,
+      quarter_all,
+      quarter_sel,
+      order_method,
+      retailer,
+      retailer_code,
+      retailer_site   = retailer_site_key,
+      retailer_type   = retailer_type_en,
+      region          = region_en,
+      region2,
+      country         = country_en,
+      city            = rtl_city,
+      promotion_code,
+      return          = return_count,
+      quantity,
+      unit_price,
+      unit_sale_price,
+      unit_cost,
+      unit_prod_cost  = production_cost,
+      unit_gross_marg = gross_margin,
+      revenue,
+      planned_revenue,
+      production_cost,
+      gross_profit,
+      prod_numb       = product_number,
+      prod_line,
+      prod_line_2,
+      prod_type       = product_type,
+      prod_name       = product_name,
+      brand,
+      color,
+      size            = product_size,
+      intro_date      = introduction_date,
+      halt_date       = discontinued_date
+   ) 
+```
+
+```{r, collapse=TRUE}
+orders_tbl %>% glimpse()
+```
+
+
+## Remove original files and save
+
+Last but not least, I can drop all original files and save the `orders_tbl`
+
+```{r, evaluate=FALSE}
+# Save orders as RDS
+orders_tbl %>%
+   write_rds("../00_data/orders_tbl.rds")
+```
+
+
+### Code Repository
+The full R code can be found on [my GitHub profile](https://github.com/DiegoUsaiUK/Loading_Merging_and_Joining_Datasets)
+
+NOTE: given their size, the RDS file and the order-details folder had to be compress before uploading them on my Github profile
+
